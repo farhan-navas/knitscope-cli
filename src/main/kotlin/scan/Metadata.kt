@@ -35,9 +35,10 @@ object MetadataUtil {
             val isDelegated = p.visibility == kotlinx.metadata.Visibility.LOCAL
             if (!isDelegated) continue
             val propName = p.name
-            val returnTypeFqn = p.returnType.toString() // crude; good enough for Kotlin types
+            val returnTypeFqn = p.returnType.toString() // good enough for Kotlin types, for now
                 .removePrefix("kotlin.") // optional normalization
-            // Better: map KmType to FQN properly; for demo we keep .toString()
+            // TODO: Map KmType to a proper JVM FQN (handle type aliases/generics); .toString() works for common cases
+            // for hackathon purposes, use toString() for now
             out[propName] = returnTypeFqn
         }
         return out

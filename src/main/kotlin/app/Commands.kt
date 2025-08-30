@@ -25,8 +25,14 @@ class ScanCmd : CliktCommand(name = "scan") {
 
     override fun run() {
         val scanner = AsmScanner()
-        val graphs = classes.map { scanner.scanClassDir(it.toPath(), module.ifBlank { null }) }
-        // Merge (simple union)
+        val graphs = classes.map { f ->
+            val p = f.toPath()
+            when {
+                f.isDirectory -> scanner.scanClassDir(p, module.ifBlank { null })
+                f.isFile && f.name.endsWith(".jar", ignoreCase = true) -> scanner.scanJar(p, module.ifBlank { null })
+                else -> error("Unsupported --classes path: ${f.absolutePath} (must be a directory or a .jar)")
+            }
+        }
         val merged = mergeGraphs(graphs)
         out.writeText(JSON.encodeToString(merged))
         echo("Wrote ${out.absolutePath} (types=${merged.types.size}, providers=${merged.providers.size}, consumers=${merged.consumers.size}, edges=${merged.edges.size})")

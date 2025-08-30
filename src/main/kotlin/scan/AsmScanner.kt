@@ -6,8 +6,20 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
+import kotlin.streams.asSequence
 
 private const val PROVIDES_DESC = "Lio/github/tiktok/knit/Provides;" // adjust if different
+
+private fun isProvides(desc: String): Boolean {
+    // desc looks like 'Lio/github/tiktok/knit/Provides;'
+    val slash = desc.lastIndexOf('/')
+    val dot = desc.lastIndexOf('.')
+    val semi = desc.lastIndexOf(';')
+    val start = maxOf(slash, dot) + 1
+    val end = if (semi >= 0) semi else desc.length
+    val simple = if (start in 0..<end) desc.substring(start, end) else desc
+    return simple == "Provides"
+}
 
 data class ScanResult(
     val types: MutableMap<String, TypeNode> = mutableMapOf(),
@@ -19,6 +31,13 @@ data class ScanResult(
 class AsmScanner {
 
     fun scanClassDir(root: Path, moduleName: String? = null): GraphJson {
+        // for debug only!!
+        val classCount = Files.walk(root).use { paths ->
+            // Convert to Kotlin sequence so we can use count { predicate }
+            paths.asSequence().count { it.isRegularFile() && it.extension == "class" }
+        }
+        println("Scanning $root ... found $classCount .class files")
+
         val res = ScanResult()
         Files.walk(root).use { paths ->
             paths.filter { it.isRegularFile() && it.extension == "class" }.forEach { parseClass(it, moduleName, res) }
@@ -39,6 +58,10 @@ class AsmScanner {
 
     private fun parseClass(file: Path, moduleName: String?, res: ScanResult) {
         val bytes = Files.readAllBytes(file)
+        parseClassBytes(bytes, moduleName, res)
+    }
+
+    private fun parseClassBytes(bytes: ByteArray, moduleName: String?, res: ScanResult) {
         val cr = ClassReader(bytes)
         val cv = object : ClassVisitor(Opcodes.ASM9) {
             lateinit var className: String
@@ -51,7 +74,7 @@ class AsmScanner {
             }
 
             override fun visitAnnotation(desc: String, visible: Boolean): AnnotationVisitor? {
-                if (desc == PROVIDES_DESC) classProvides = true
+                if (isProvides(desc)) classProvides = true
                 return super.visitAnnotation(desc, visible)
             }
 
@@ -60,7 +83,7 @@ class AsmScanner {
                 val isDelegate = name.endsWith("\$delegate")
                 return object : FieldVisitor(api) {
                     override fun visitAnnotation(desc: String, visible: Boolean): AnnotationVisitor? {
-                        if (desc == PROVIDES_DESC) {
+                        if (isProvides(desc)) {
                             // @Provides on a field -> provides fieldType
                             fieldProviders += (name to fieldType)
                         }
@@ -96,7 +119,7 @@ class AsmScanner {
                 // Capture @Provides on constructor parameters → they provide their type within class scope
                 return object : MethodVisitor(api) {
                     override fun visitParameterAnnotation(parameter: Int, annDesc: String, visible: Boolean): AnnotationVisitor? {
-                        if (annDesc == PROVIDES_DESC) {
+                        if (isProvides(annDesc)) {
                             val t = argTypes[parameter]
                             val provId = "${simple(className)}.param$parameter"
                             res.providers += ProviderNode(
@@ -117,13 +140,17 @@ class AsmScanner {
             override fun visitEnd() {
                 // Use Kotlin metadata to find delegated properties + their types
                 MetadataUtil.extractDelegatedProperties(bytes)?.forEach { (propName, returnFqn) ->
-                    if (propName in delegateFields) {
-                        val consumerId = "${simple(className)}.$propName"
-                        res.consumers += ConsumerNode(id = consumerId, needs = returnFqn, owner = className, module = moduleName)
-                        res.types.putIfAbsent(returnFqn, TypeNode(id = returnFqn))
-                        res.edges += Edge(from = consumerId, to = returnFqn, kind = EdgeKind.needs)
-                    }
+                    val consumerId = "${simple(className)}.$propName"
+                    res.consumers += ConsumerNode(
+                        id = consumerId,
+                        needs = returnFqn,
+                        owner = className,
+                        module = moduleName
+                    )
+                    res.types.putIfAbsent(returnFqn, TypeNode(id = returnFqn))
+                    res.edges += Edge(from = consumerId, to = returnFqn, kind = EdgeKind.needs)
                 }
+
                 // Field-level providers recorded earlier
                 fieldProviders.forEach { (fieldName, fieldType) ->
                     val provId = "${simple(className)}.$fieldName"
@@ -135,6 +162,29 @@ class AsmScanner {
             }
         }
         cr.accept(cv, ClassReader.SKIP_DEBUG)
+    }
+
+    fun scanJar(jarPath: Path, moduleName: String? = null): GraphJson {
+        val res = ScanResult()
+        val zf = java.util.zip.ZipFile(jarPath.toFile())
+        val entries = zf.entries().asSequence().filter { !it.isDirectory && it.name.endsWith(".class") }.toList()
+        println("Scanning JAR $jarPath ... found ${entries.size} .class files")
+        for (e in entries) {
+            val bytes = zf.getInputStream(e).use { it.readAllBytes() }
+            parseClassBytes(bytes, moduleName, res)
+        }
+        zf.close()
+        return GraphJson(
+            types = res.types.values.toList(),
+            providers = res.providers.toList(),
+            consumers = res.consumers.toList(),
+            edges = res.edges.toList(),
+            metrics = GraphJson.Metrics(
+                generatedAt = java.time.Instant.now().toString(),
+                nodeCount = res.types.size + res.providers.size + res.consumers.size,
+                edgeCount = res.edges.size
+            )
+        )
     }
 
     private fun simple(fqn: String) = fqn.substringAfterLast('.')
