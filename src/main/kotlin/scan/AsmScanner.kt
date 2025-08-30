@@ -8,10 +8,7 @@ import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
 import kotlin.streams.asSequence
 
-private const val PROVIDES_DESC = "Lio/github/tiktok/knit/Provides;" // adjust if different
-
 private fun isProvides(desc: String): Boolean {
-    // desc looks like 'Lio/github/tiktok/knit/Provides;'
     val slash = desc.lastIndexOf('/')
     val dot = desc.lastIndexOf('.')
     val semi = desc.lastIndexOf(';')
@@ -99,8 +96,15 @@ class AsmScanner {
                 }
             }
 
-            override fun visitMethod(access: Int, name: String, desc: String, signature: String?, exceptions: Array<out String>?): MethodVisitor {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                desc: String,
+                signature: String?,
+                exceptions: Array<out String>?
+            ): MethodVisitor {
                 val isCtor = name == "<init>"
+                val returnType = Type.getReturnType(desc).className
                 val argTypes = Type.getArgumentTypes(desc).map { it.className }
 
                 // If class-level @Provides, ctor "provides" the class; "requires" = ctor params
@@ -116,8 +120,45 @@ class AsmScanner {
                     argTypes.forEach { t -> res.edges += Edge(from = provId, to = t, kind = EdgeKind.requires) }
                 }
 
-                // Capture @Provides on constructor parameters → they provide their type within class scope
+                // Track whether THIS method appears to construct/return its own return type.
+                var constructsReturnType = false
+                var methodHasProvides = false
+
                 return object : MethodVisitor(api) {
+                    override fun visitAnnotation(annDesc: String, visible: Boolean): AnnotationVisitor? {
+                        if (isProvides(annDesc)) {
+                            methodHasProvides = true
+                        }
+                        return super.visitAnnotation(annDesc, visible)
+                    }
+
+                    // Detect `new <ReturnType>` bytecode
+                    override fun visitTypeInsn(opcode: Int, typeInternalName: String) {
+                        if (opcode == Opcodes.NEW) {
+                            val newType = Type.getObjectType(typeInternalName).className
+                            if (newType == returnType) {
+                                constructsReturnType = true
+                            }
+                        }
+                        super.visitTypeInsn(opcode, typeInternalName)
+                    }
+
+                    // Detect calls that *return* the method's return type (factory methods)
+                    override fun visitMethodInsn(opcode: Int, owner: String, mName: String, mDesc: String, isInterface: Boolean) {
+                        // 1) Direct constructor call of the returnType
+                        if (opcode == Opcodes.INVOKESPECIAL && mName == "<init>") {
+                            val ownerFqn = owner.replace('/', '.')
+                            if (ownerFqn == returnType) constructsReturnType = true
+                        }
+                        // 2) Any method whose return type matches our method's returnType
+                        val calleeRet = Type.getReturnType(mDesc).className
+                        if (calleeRet == returnType) {
+                            constructsReturnType = true
+                        }
+                        super.visitMethodInsn(opcode, owner, mName, mDesc, isInterface)
+                    }
+
+                    // Capture @Provides on constructor parameters → they provide their type within class scope
                     override fun visitParameterAnnotation(parameter: Int, annDesc: String, visible: Boolean): AnnotationVisitor? {
                         if (isProvides(annDesc)) {
                             val t = argTypes[parameter]
@@ -132,6 +173,29 @@ class AsmScanner {
                     }
 
                     override fun visitEnd() {
+                        // === Consumer detection for rewritten getters/assemblers ===
+                        // Emit a Consumer if:
+                        // - not a constructor
+                        // - method returns a real type (not void/Unit)
+                        // - we saw bytecode that constructs/returns that return type (post-Knit assembly)
+                        // - the method itself is NOT a provider (@Provides) to avoid double-classifying
+                        val isSynthetic = (access and Opcodes.ACC_SYNTHETIC) != 0
+                        val isBridge = (access and Opcodes.ACC_BRIDGE) != 0
+                        if (!isCtor && !isSynthetic && !isBridge && returnType != "void" && constructsReturnType && !methodHasProvides) {
+                            val consumerId = "${simple(className)}.$name"
+                            // node + edge
+                            res.consumers += ConsumerNode(
+                                id = consumerId,
+                                needs = returnType,
+                                owner = className,
+                                module = moduleName
+                            )
+                            res.types.putIfAbsent(returnType, TypeNode(id = returnType))
+                            if (res.edges.none { it.from == consumerId && it.to == returnType && it.kind == EdgeKind.needs }) {
+                                res.edges += Edge(from = consumerId, to = returnType, kind = EdgeKind.needs)
+                            }
+                        }
+
                         super.visitEnd()
                     }
                 }
