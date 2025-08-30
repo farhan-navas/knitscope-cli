@@ -1,0 +1,17 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+
+# IntelliJ
+.idea/
+!.idea/codeStyles/
+!.idea/inspectionProfiles/
+!.idea/runConfigurations/
+*.iml
+
+# Gradle
+.gradle/
+build/
+
+# OS/editor clutter
+.DS_Store
