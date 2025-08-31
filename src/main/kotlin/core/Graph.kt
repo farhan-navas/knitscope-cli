@@ -23,10 +23,12 @@ data class ProviderNode(
 
 @Serializable
 data class ConsumerNode(
-    val id: NodeId,            // e.g., "UserService.user"
-    val needs: FqName,         // the needed type
-    val owner: FqName,
-    val module: String? = null
+    val id: String,
+    val needs: String,
+    val owner: String,
+    val module: String? = null,
+    val tags: List<String> = emptyList(),     // e.g. ["MULTI"]
+    val provenance: String? = null            // e.g. "getStoreComponent.getFileSystem -> new FileSystem"
 )
 
 @Serializable
@@ -34,9 +36,10 @@ enum class EdgeKind { provides, requires, needs }
 
 @Serializable
 data class Edge(
-    val from: NodeId,          // provider/consumer id
-    val to: String,            // target node id or type id
-    val kind: EdgeKind
+    val from: String,
+    val to: String,
+    val kind: EdgeKind,
+    val attrs: Map<String, String>? = null
 )
 
 @Serializable
